@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useApp } from '../context/AppContext';
-import { Store, Eye, EyeOff } from 'lucide-react';
-import logo from '../assets/mini-preco-logo.png';
+import { Eye, EyeOff } from 'lucide-react';
+import logo from '../assets/mini-preco-logo-v2.png';
 
 export default function Login() {
   const [login, setLogin] = useState('');
@@ -10,6 +10,7 @@ export default function Login() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [entering, setEntering] = useState(false);
   const { login: authLogin } = useApp();
   const navigate = useNavigate();
 
@@ -24,7 +25,8 @@ export default function Login() {
     const result = await authLogin(login.trim(), password);
     setLoading(false);
     if (result.success) {
-      navigate('/');
+      setEntering(true);
+      setTimeout(() => navigate('/pdv'), 2600);
     } else {
       setError(result.error);
     }
@@ -38,7 +40,48 @@ export default function Login() {
         <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-red-50 rounded-full opacity-50 blur-3xl"></div>
       </div>
 
-      <div className="relative w-full max-w-md">
+      {entering && (
+        <div className="login-entry-overlay fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-white" role="status" aria-live="polite" aria-label="Entrando no Caixa Mini Preço">
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_#fff_0%,_#fff5f5_48%,_#fee2e2_100%)]" />
+          <div className="login-entry-glow absolute h-72 w-72 rounded-full bg-red-200/50 blur-3xl" />
+          <div className="relative flex h-full w-full max-w-3xl flex-col items-center justify-center">
+            <div className="login-logo-drop absolute top-[25%] w-64">
+              <img src={logo} alt="Mini Preço Variedades" className="w-full object-contain drop-shadow-xl" />
+            </div>
+
+            <div className="login-cart-run absolute top-[34%] h-44 w-64 text-red-600" aria-hidden="true">
+              <svg viewBox="0 0 300 190" className="h-full w-full overflow-visible drop-shadow-xl">
+                <g className="login-groceries">
+                  <path d="M98 72V35c0-8 6-14 14-14h17c8 0 14 6 14 14v37" fill="#ef4444" />
+                  <path d="M108 20h25v12h-25z" fill="#b91c1c" />
+                  <path d="M154 74V28h37v46" fill="#dc2626" />
+                  <path d="M162 37h21v21h-21z" fill="#fff" opacity=".88" />
+                  <path d="M201 75V42c0-9 7-16 16-16s16 7 16 16v33" fill="#f87171" />
+                  <path d="M208 26c0-10 4-17 9-22 5 5 9 12 9 22" fill="#b91c1c" />
+                  <circle cx="78" cy="60" r="20" fill="#ef4444" />
+                  <path d="M77 39c2-13 13-18 22-14-4 9-11 14-22 14Z" fill="#991b1b" />
+                </g>
+                <g className="login-cart-vector" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M28 35h24l17 91h151c10 0 18-6 21-16l18-62H61" strokeWidth="12" />
+                  <path d="M76 88h155M95 48l8 78m47-78v78m48-78-9 78" strokeWidth="6" opacity=".72" />
+                  <path d="M74 126c3 17 15 25 34 25h116" strokeWidth="10" />
+                  <g className="login-cart-wheel"><circle cx="105" cy="169" r="14" strokeWidth="9" /><path d="M105 158v22M94 169h22" strokeWidth="3" /></g>
+                  <g className="login-cart-wheel login-cart-wheel-two"><circle cx="211" cy="169" r="14" strokeWidth="9" /><path d="M211 158v22M200 169h22" strokeWidth="3" /></g>
+                </g>
+              </svg>
+              <div className="login-speed-lines absolute left-[-110px] top-24 space-y-3"><span className="block h-1 w-24 rounded-full bg-red-500" /><span className="ml-8 block h-1 w-16 rounded-full bg-red-300" /><span className="block h-1 w-20 rounded-full bg-red-400" /></div>
+            </div>
+
+            <div className="login-progress-wrap absolute bottom-[22%] w-72 text-center">
+              <p className="login-loading-label mb-3 text-sm font-bold uppercase tracking-[0.24em] text-red-700">Preparando o caixa</p>
+              <div className="h-2 overflow-hidden rounded-full bg-red-100 shadow-inner"><div className="login-progress-bar h-full rounded-full bg-gradient-to-r from-red-700 via-red-500 to-red-700" /></div>
+              <p className="mt-3 text-xs text-gray-500">Carregando produtos e formas de pagamento...</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className={`relative w-full max-w-md ${entering ? 'pointer-events-none opacity-0' : ''}`}>
         {/* Logo */}
         <div className="text-center mb-4">
           <img

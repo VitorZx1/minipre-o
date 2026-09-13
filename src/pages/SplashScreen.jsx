@@ -1,7 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import { useApp } from '../context/AppContext';
 import { Store, ArrowRight, LogIn } from 'lucide-react';
-import logo from '../assets/mini-preco-logo.png';
+import logo from '../assets/mini-preco-logo-v2.png';
 
 export default function SplashScreen() {
   const navigate = useNavigate();

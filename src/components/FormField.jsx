@@ -1,4 +1,4 @@
-export default function FormField({ label, type = 'text', value, onChange, options, placeholder, disabled, required, className = '' }) {
+export default function FormField({ label, type = 'text', value, onChange, options, placeholder, disabled, required, className = '', inputRef, autoFocus = false, onKeyDown }) {
   const baseClass = "w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all disabled:bg-gray-100 disabled:cursor-not-allowed";
 
   return (
@@ -22,11 +22,14 @@ export default function FormField({ label, type = 'text', value, onChange, optio
         </select>
       ) : (
         <input
+          ref={inputRef}
           type={type}
           value={value || ''}
           onChange={onChange}
           placeholder={placeholder}
           disabled={disabled}
+          autoFocus={autoFocus}
+          onKeyDown={onKeyDown}
           className={baseClass}
         />
       )}

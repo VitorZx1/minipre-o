@@ -1,13 +1,15 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import DataTable from '../components/DataTable';
 import Modal from '../components/Modal';
 import FormField from '../components/FormField';
-import { Plus, Edit, Trash2, Power, Search, X } from 'lucide-react';
+import { Plus, Edit, Trash2, Power, Search, X, ScanBarcode, CheckCircle2, LoaderCircle } from 'lucide-react';
 import { categories, units } from '../data/seed';
+import { localServer } from '../services/localServer';
 
 export default function Produtos() {
-  const { products, addProduct, updateProduct, deleteProduct, inactivateProduct, can } = useApp();
+  const { products, addProduct, updateProduct, deleteProduct, inactivateProduct, showToast } = useApp();
+  const barcodeRef = useRef(null);
   const [selected, setSelected] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [modalType, setModalType] = useState(''); // 'new', 'edit', 'confirmDelete'
@@ -15,10 +17,12 @@ export default function Produtos() {
   const [filterCategory, setFilterCategory] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
   const [form, setForm] = useState({});
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [lookupMessage, setLookupMessage] = useState('');
 
   const filtered = useMemo(() => {
     return products.filter(p => {
-      const matchSearch = !search || p.id.toLowerCase().includes(search.toLowerCase()) || p.name.toLowerCase().includes(search.toLowerCase());
+      const matchSearch = !search || p.id.toLowerCase().includes(search.toLowerCase()) || p.name.toLowerCase().includes(search.toLowerCase()) || String(p.internalCode || '').toLowerCase().includes(search.toLowerCase());
       const matchCategory = !filterCategory || p.category === filterCategory;
       const matchStatus = !filterStatus || p.status === filterStatus;
       return matchSearch && matchCategory && matchStatus;
@@ -27,7 +31,9 @@ export default function Produtos() {
 
   const columns = [
     { header: 'Código', accessor: 'id', width: '100px' },
+    { header: 'Código interno', accessor: 'internalCode', render: (row) => <span className="font-mono text-xs font-semibold">{row.internalCode || '—'}</span> },
     { header: 'Descrição', accessor: 'name' },
+    { header: 'Código de barras', accessor: 'barcode', render: (row) => <span className="font-mono text-xs text-gray-600">{row.barcode || '—'}</span> },
     { header: 'Categoria', accessor: 'category', render: (row) => <span className="px-2 py-1 bg-gray-100 rounded-md text-xs font-medium">{row.category}</span> },
     { header: 'Unidade', accessor: 'unit', width: '80px' },
     { header: 'Preço Custo', accessor: 'cost', render: (row) => <span className="text-gray-500">R$ {Number(row.cost).toFixed(2)}</span> },
@@ -45,23 +51,58 @@ export default function Produtos() {
   ];
 
   const handleNew = () => {
-    setForm({ name: '', category: 'Mercearia', unit: 'Unidade', cost: '', price: '', stock: 0, supplier: '', status: 'Ativo' });
+    setForm({ internalCode: '', barcode: '', name: '', category: 'Mercearia', unit: 'Unidade', soldByWeight: false, cost: '', price: '', stock: 0, supplier: '', status: 'Ativo' });
     setModalType('new');
     setModalOpen(true);
+    setLookupMessage('');
+    setTimeout(() => barcodeRef.current?.focus(), 50);
   };
+
+  async function lookupBarcode() {
+    const barcode = String(form.barcode || '').replace(/\D/g, '');
+    if (!barcode) return;
+    if (products.some(product => product.barcode === barcode && product.id !== selected?.id)) {
+      showToast('Este código de barras já pertence a outro produto.', 'error');
+      return;
+    }
+    setLookupBusy(true); setLookupMessage('Consultando o produto...');
+    try {
+      const result = await localServer.lookupProduct(barcode);
+      if (!result.found) {
+        setLookupMessage('Produto não encontrado na base pública. Preencha os dados manualmente.');
+        return;
+      }
+      setForm(current => ({ ...current, barcode, name: result.name, category: result.category, unit: result.unit }));
+      setLookupMessage(`Produto identificado${result.quantity ? ` · Embalagem: ${result.quantity}` : ''}. Confira os dados e informe os preços.`);
+      showToast('Descrição, categoria e unidade preenchidas automaticamente.');
+    } catch (error) { setLookupMessage(error.message); showToast(error.message, 'error'); }
+    finally { setLookupBusy(false); }
+  }
 
   const handleEdit = () => {
     if (!selected) return;
-    setForm({ ...selected });
+    setForm({ ...selected, soldByWeight: selected.soldByWeight ?? selected.unit === 'kg' });
     setModalType('edit');
     setModalOpen(true);
   };
 
   const handleSave = () => {
+    const normalizedBarcode = String(form.barcode || '').replace(/\D/g, '');
+    const normalizedInternalCode = String(form.internalCode || '').trim().toUpperCase();
+    if (normalizedInternalCode && products.some(product => String(product.internalCode || '').toUpperCase() === normalizedInternalCode && product.id !== selected?.id)) {
+      showToast('Este código interno já pertence a outro produto.', 'error');
+      return;
+    }
+    if (normalizedBarcode && products.some(product => product.barcode === normalizedBarcode && product.id !== selected?.id)) {
+      showToast('Este código de barras já pertence a outro produto.', 'error');
+      barcodeRef.current?.focus();
+      return;
+    }
+    const data = { ...form, internalCode: normalizedInternalCode, barcode: normalizedBarcode, unit: form.soldByWeight ? 'kg' : form.unit, stock: Number(form.stock) || 0 };
     if (modalType === 'new') {
-      addProduct({ ...form, id: `PROD-${String(products.length + 1).padStart(3, '0')}` });
+      addProduct({ ...data, id: `PROD-${String(products.length + 1).padStart(3, '0')}` });
     } else if (modalType === 'edit') {
-      updateProduct(selected.id, form);
+      updateProduct(selected.id, data);
     }
     setModalOpen(false);
     setSelected(null);
@@ -177,16 +218,34 @@ export default function Produtos() {
         onSave={handleSave}
       >
         <div className="grid grid-cols-2 gap-4">
+          <div className="col-span-2 flex items-start gap-3 p-4 bg-blue-50 border border-blue-200 rounded-xl">
+            <div className="w-10 h-10 bg-white rounded-lg flex items-center justify-center flex-shrink-0 shadow-sm"><ScanBarcode className="w-5 h-5 text-blue-600" /></div>
+            <div><p className="text-sm font-semibold text-blue-900">Pegue o leitor e bipe o código de barras</p><p className="text-xs text-blue-700 mt-1">O número completo será preenchido automaticamente no campo abaixo. Você também pode digitá-lo.</p></div>
+          </div>
           {modalType === 'edit' && (
             <FormField label="Código" value={form.id} disabled className="col-span-2" />
           )}
+          <FormField label="Código interno da loja" value={form.internalCode || ''} onChange={(e) => setForm({ ...form, internalCode: e.target.value.toUpperCase() })} placeholder="Ex.: CARNE01" className="col-span-2" />
+          <p className="col-span-2 -mt-2 text-xs text-gray-500">Use este código para produtos sem código de barras, como carnes, frutas e verduras. No caixa, basta digitá-lo e pressionar Enter.</p>
+          <div className="col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">Código de barras / EAN</label>
+            <div className="relative">
+              <ScanBarcode className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+              <input ref={barcodeRef} autoFocus inputMode="numeric" value={form.barcode || ''} onChange={(event) => { setForm({ ...form, barcode: event.target.value.replace(/\D/g, '') }); setLookupMessage(''); }} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); lookupBarcode(); } }} placeholder="Bipe agora ou digite todos os números" className="w-full pl-11 pr-12 py-2.5 border-2 border-blue-200 rounded-lg font-mono text-base tracking-wider outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500" />
+              <button type="button" onClick={lookupBarcode} disabled={lookupBusy || !form.barcode} title="Identificar produto" className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-emerald-600 disabled:text-gray-300">{lookupBusy ? <LoaderCircle className="w-5 h-5 animate-spin" /> : <CheckCircle2 className="w-5 h-5" />}</button>
+            </div>
+            <p className="text-xs text-gray-500 mt-1.5">EAN-13 normalmente tem 13 números. Os zeros iniciais serão preservados.</p>
+            {lookupMessage && <p className={`text-xs mt-2 rounded-lg p-2.5 ${lookupMessage.startsWith('Produto identificado') ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>{lookupMessage}</p>}
+            <p className="text-[11px] text-gray-400 mt-1">Dados sugeridos pela base colaborativa Open Food Facts; confirme antes de salvar.</p>
+          </div>
           <FormField label="Descrição" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Nome do produto" className="col-span-2" required />
-          <FormField label="Categoria" type="select" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} options={categories.map(c => ({ value: c, label: c }))} />
-          <FormField label="Unidade" type="select" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} options={units.map(u => ({ value: u, label: u }))} />
-          <FormField label="Preço Custo (R$)" type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} placeholder="0.00" />
-          <FormField label="Preço Venda (R$)" type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} placeholder="0.00" />
-          <FormField label="Estoque Atual" type="number" value={form.stock} onChange={(e) => setForm({ ...form, stock: parseInt(e.target.value) || 0 })} />
-          <FormField label="Fornecedor" value={form.supplier} onChange={(e) => setForm({ ...form, supplier: e.target.value })} placeholder="Nome do fornecedor" />
+          <FormField label="Categoria" type="select" value={form.category} onChange={(e) => { const category = e.target.value; const weighted = ['Açougue', 'Hortifruti'].includes(category); setForm({ ...form, category, ...(weighted ? { soldByWeight: true, unit: 'kg' } : {}) }); }} options={categories.map(c => ({ value: c, label: c }))} />
+          <FormField label="Forma de venda" type="select" value={form.soldByWeight ? 'weight' : 'unit'} onChange={(e) => { const soldByWeight = e.target.value === 'weight'; setForm({ ...form, soldByWeight, unit: soldByWeight ? 'kg' : (form.unit === 'kg' ? 'Unidade' : form.unit) }); }} options={[{ value: 'unit', label: 'Por unidade' }, { value: 'weight', label: 'Por peso (kg)' }]} />
+          <FormField label="Unidade" type="select" value={form.unit} disabled={form.soldByWeight} onChange={(e) => setForm({ ...form, unit: e.target.value, soldByWeight: e.target.value === 'kg' })} options={units.map(u => ({ value: u, label: u }))} />
+          <FormField label={form.soldByWeight ? 'Preço de custo por kg (R$)' : 'Preço Custo (R$)'} type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} placeholder="0.00" />
+          <FormField label={form.soldByWeight ? 'Preço de venda por kg (R$)' : 'Preço Venda (R$)'} type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} placeholder="0.00" />
+          <FormField label={form.soldByWeight ? 'Estoque atual (kg)' : 'Estoque Atual'} type="number" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} />
+          {form.soldByWeight && <div className="col-span-2 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800"><strong>Produto vendido por peso.</strong> Ao digitar o código deste produto no caixa, o sistema pedirá o peso em quilogramas e calculará o total automaticamente.</div>}
           <FormField label="Situação" type="select" value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })} options={[{ value: 'Ativo', label: 'Ativo' }, { value: 'Inativo', label: 'Inativo' }]} />
         </div>
       </Modal>

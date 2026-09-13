@@ -1,7 +1,24 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { seedProducts, seedSuppliers, seedFinanceiro, seedUsers, seedCompras, seedEstoque } from '../data/seed';
+import { seedUsers } from '../data/seed';
+import { localServer } from '../services/localServer';
 
 const AppContext = createContext();
+
+const defaultReceiptSettings = {
+  companyName: 'MINI PREÇO VARIEDADES',
+  legalName: '',
+  cnpj: '',
+  address: '',
+  city: '',
+  phone: '',
+  logo: '',
+  footerMessage: 'Obrigado pela preferência!\nVolte sempre!',
+  showOperator: true,
+  showProductCode: false,
+  paperWidth: '80',
+  copies: 1,
+  autoPrint: true,
+};
 
 export function useApp() {
   return useContext(AppContext);
@@ -22,23 +39,101 @@ function saveToStorage(key, data) {
 
 export function AppProvider({ children }) {
   const [user, setUser] = useState(null);
-  const [products, setProducts] = useState(() => loadFromStorage('products', seedProducts));
-  const [suppliers, setSuppliers] = useState(() => loadFromStorage('suppliers', seedSuppliers));
-  const [financeiro, setFinanceiro] = useState(() => loadFromStorage('financeiro', seedFinanceiro));
-  const [users, setUsers] = useState(() => loadFromStorage('users', seedUsers));
-  const [compras, setCompras] = useState(() => loadFromStorage('compras', seedCompras));
-  const [estoque, setEstoque] = useState(() => loadFromStorage('estoque', seedEstoque));
+  const [products, setProducts] = useState(() => loadFromStorage('products', []));
+  const [suppliers, setSuppliers] = useState(() => loadFromStorage('suppliers', []));
+  const [financeiro, setFinanceiro] = useState(() => loadFromStorage('financeiro', []));
+  const [users, setUsers] = useState(() => loadFromStorage('users', seedUsers.filter(item => item.login === 'adm')));
+  const [compras, setCompras] = useState(() => loadFromStorage('compras', []));
+  const [estoque, setEstoque] = useState(() => loadFromStorage('estoque', []));
+  const [vendas, setVendas] = useState(() => loadFromStorage('vendas', []));
   const [auditLog, setAuditLog] = useState(() => loadFromStorage('audit', []));
   const [toast, setToast] = useState(null);
+  const [storageReady, setStorageReady] = useState(false);
+  const [storageInfo, setStorageInfo] = useState({ connected: false });
+  const [receiptSettings, setReceiptSettings] = useState(() => loadFromStorage('receipt-settings', defaultReceiptSettings));
+
+  useEffect(() => {
+    let active = true;
+    async function connectStorage() {
+      try {
+        const [info, stored, receiptResponse, initializedResponse, cleanupResponse] = await Promise.all([localServer.health(), localServer.loadAll(), localServer.getSetting('receipt'), localServer.getSetting('data-initialized'), localServer.getSetting('example-data-cleared-v1')]);
+        if (!active) return;
+        setStorageInfo(info);
+        if (receiptResponse.value) {
+          const mergedSettings = { ...defaultReceiptSettings, ...receiptResponse.value };
+          setReceiptSettings(mergedSettings);
+          saveToStorage('receipt-settings', mergedSettings);
+        } else {
+          await localServer.setSetting('receipt', receiptSettings);
+        }
+        let effectiveStored = stored;
+        if (cleanupResponse.value !== true) {
+          const administrator = [...(stored.users || []), ...users, ...seedUsers].find(item => item.login === 'adm') || seedUsers[0];
+          effectiveStored = { products: [], suppliers: [], financeiro: [], users: [administrator], compras: [], estoque: [], vendas: [], audit: [] };
+          await Promise.all(Object.entries(effectiveStored).map(([collection, records]) => localServer.saveCollection(collection, records)));
+          await localServer.setSetting('example-data-cleared-v1', true);
+        }
+        const localSnapshot = { products, suppliers, financeiro, users, compras, estoque, vendas, audit: auditLog };
+        const setters = { products: setProducts, suppliers: setSuppliers, financeiro: setFinanceiro, users: setUsers, compras: setCompras, estoque: setEstoque, vendas: setVendas, audit: setAuditLog };
+        const databaseAlreadyUsed = initializedResponse.value === true || cleanupResponse.value !== true || Object.values(effectiveStored).some(records => records?.length);
+        for (const [collection, records] of Object.entries(localSnapshot)) {
+          if (databaseAlreadyUsed) {
+            const databaseRecords = effectiveStored[collection] || [];
+            setters[collection](databaseRecords);
+            saveToStorage(collection, databaseRecords);
+          } else if (records.length) {
+            await localServer.saveCollection(collection, records);
+          }
+        }
+        await localServer.setSetting('data-initialized', true);
+      } catch {
+        if (active) setStorageInfo({ connected: false, error: 'Serviço local indisponível' });
+      } finally {
+        if (active) setStorageReady(true);
+      }
+    }
+    connectStorage();
+    return () => { active = false; };
+    // O retrato inicial é usado somente na primeira conexão.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const persist = useCallback((collection, records) => {
+    if (!storageReady || !storageInfo.connected) return;
+    localServer.saveCollection(collection, records).catch(error => {
+      setStorageInfo(previous => ({ ...previous, connected: false, error: error.message }));
+    });
+  }, [storageReady, storageInfo.connected]);
 
   // Persist data
-  useEffect(() => { saveToStorage('products', products); }, [products]);
-  useEffect(() => { saveToStorage('suppliers', suppliers); }, [suppliers]);
-  useEffect(() => { saveToStorage('financeiro', financeiro); }, [financeiro]);
-  useEffect(() => { saveToStorage('users', users); }, [users]);
-  useEffect(() => { saveToStorage('compras', compras); }, [compras]);
-  useEffect(() => { saveToStorage('estoque', estoque); }, [estoque]);
-  useEffect(() => { saveToStorage('audit', auditLog); }, [auditLog]);
+  useEffect(() => { saveToStorage('products', products); persist('products', products); }, [products, persist]);
+  useEffect(() => { saveToStorage('suppliers', suppliers); persist('suppliers', suppliers); }, [suppliers, persist]);
+  useEffect(() => { saveToStorage('financeiro', financeiro); persist('financeiro', financeiro); }, [financeiro, persist]);
+  useEffect(() => { saveToStorage('users', users); persist('users', users); }, [users, persist]);
+  useEffect(() => { saveToStorage('compras', compras); persist('compras', compras); }, [compras, persist]);
+  useEffect(() => { saveToStorage('estoque', estoque); persist('estoque', estoque); }, [estoque, persist]);
+  useEffect(() => { saveToStorage('vendas', vendas); persist('vendas', vendas); }, [vendas, persist]);
+  useEffect(() => { saveToStorage('audit', auditLog); persist('audit', auditLog); }, [auditLog, persist]);
+
+  const refreshStorageInfo = useCallback(async () => {
+    const info = await localServer.health();
+    setStorageInfo(info);
+    return info;
+  }, []);
+
+  const changeStorageDirectory = useCallback(async (directory) => {
+    const info = await localServer.setStorageDirectory(directory);
+    setStorageInfo(info);
+    return info;
+  }, []);
+
+  const updateReceiptSettings = useCallback(async (settings) => {
+    const normalized = { ...defaultReceiptSettings, ...settings };
+    if (storageInfo.connected) await localServer.setSetting('receipt', normalized);
+    setReceiptSettings(normalized);
+    saveToStorage('receipt-settings', normalized);
+    return normalized;
+  }, [storageInfo.connected]);
 
   const showToast = useCallback((message, type = 'success') => {
     setToast({ message, type });
@@ -67,7 +162,7 @@ export function AppProvider({ children }) {
       addAudit('Segurança', 'Acesso', 'adm', 'Login realizado com sucesso');
       return { success: true };
     }
-    if (found && found.status === 'Ativo') {
+    if (found && found.status === 'Ativo' && found.password === password) {
       setUser(found);
       addAudit('Segurança', 'Acesso', found.login, 'Login realizado com sucesso');
       return { success: true };
@@ -78,6 +173,15 @@ export function AppProvider({ children }) {
   const logout = useCallback(() => {
     setUser(null);
   }, []);
+
+  const authorizeManager = useCallback((loginStr, password) => {
+    const normalizedLogin = String(loginStr || '').trim().toLowerCase();
+    if (normalizedLogin === 'adm' && password === 'adm') return { success: true, manager: 'ADMINISTRADOR' };
+    const manager = users.find(candidate => candidate.login.toLowerCase() === normalizedLogin && candidate.status === 'Ativo');
+    const privileged = manager && (manager.permissions === null || manager.sector === 'Administrativo' || manager.role === 'CEO');
+    if (privileged && manager.password === password) return { success: true, manager: manager.name };
+    return { success: false, error: 'Usuário ou senha de administrador/dono inválidos.' };
+  }, [users]);
 
   const can = useCallback((action, module) => {
     if (!user || user.permissions === null) return true;
@@ -199,6 +303,32 @@ export function AppProvider({ children }) {
     showToast('Movimentação registrada!');
   }, [addAudit, showToast]);
 
+  const finalizeSale = useCallback((sale) => {
+    const now = new Date();
+    const id = `VEN-${now.getFullYear()}-${String(Date.now()).slice(-7)}`;
+    const completedSale = { ...sale, id, createdAt: now.toISOString(), operator: user?.name || 'ADMINISTRADOR', status: 'Concluída' };
+    setVendas(prev => [completedSale, ...prev]);
+    setProducts(prev => prev.map(product => {
+      const item = sale.items.find(entry => entry.productId === product.id);
+      return item ? { ...product, stock: Math.max(0, Number(product.stock) - item.quantity) } : product;
+    }));
+    setEstoque(prev => [
+      ...sale.items.map((item, index) => ({
+        id: `MOV-${Date.now()}-${index}`,
+        date: now.toLocaleDateString('pt-BR'),
+        type: 'Saída', product: item.name, quantity: -item.quantity,
+        document: id, responsible: user?.name || 'ADMINISTRADOR', status: 'Concluído',
+      })),
+      ...prev,
+    ]);
+    setFinanceiro(prev => [{
+      id: `FIN-${Date.now()}`, date: now.toLocaleDateString('pt-BR'), type: 'Receita',
+      description: `Venda ${id}`, category: 'Venda PDV', value: sale.total, status: 'Lançado',
+    }, ...prev]);
+    addAudit('PDV', 'Venda', id, `Venda finalizada no valor de R$ ${sale.total.toFixed(2)}`);
+    return completedSale;
+  }, [user, addAudit]);
+
   // Dashboard metrics
   const metrics = {
     totalProducts: products.length,
@@ -212,17 +342,20 @@ export function AppProvider({ children }) {
   };
 
   const value = {
-    user, login, logout, can,
+    user, login, logout, authorizeManager, can,
     products, addProduct, updateProduct, deleteProduct, inactivateProduct,
     suppliers, addSupplier, updateSupplier, toggleSupplierStatus,
     financeiro, addFinanceiro,
     users, addUser, updateUser, deleteUser, inactivateUser,
     compras, addCompra, updateCompra, deleteCompra, addObservacao,
     estoque, addEstoque,
+    vendas, finalizeSale,
     auditLog,
     metrics,
     toast, showToast,
     addAudit,
+    storageInfo, storageReady, refreshStorageInfo, changeStorageDirectory,
+    receiptSettings, updateReceiptSettings,
   };
 
   return (
