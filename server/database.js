@@ -7,7 +7,7 @@ const appConfigDir = path.join(process.env.APPDATA || path.join(os.homedir(), '.
 const configFile = path.join(appConfigDir, 'storage.json');
 const defaultStorageDir = path.join(appConfigDir, 'dados');
 
-const collections = ['products', 'suppliers', 'financeiro', 'users', 'compras', 'estoque', 'vendas', 'audit'];
+const collections = ['products', 'suppliers', 'financeiro', 'users', 'compras', 'estoque', 'vendas', 'audit', 'customers', 'customerLedger'];
 let database;
 let currentStorageDir;
 

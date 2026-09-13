@@ -12,6 +12,7 @@ import Compras from './pages/Compras';
 import ArmazenamentoLocal from './pages/ArmazenamentoLocal';
 import PDV from './pages/PDV';
 import Relatorios from './pages/Relatorios';
+import Clientes from './pages/Clientes';
 import Layout from './components/Layout';
 import Toast from './components/Toast';
 
@@ -36,6 +37,7 @@ function AppRoutes() {
         <Route path="compras" element={<Compras />} />
         <Route path="pdv" element={<PDV />} />
         <Route path="relatorios" element={<Relatorios />} />
+        <Route path="clientes" element={<Clientes />} />
         <Route path="configuracao-local" element={<ArmazenamentoLocal />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

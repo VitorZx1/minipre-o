@@ -18,6 +18,7 @@ const navGroups = [
       { to: '/pdv', icon: ScanBarcode, label: 'Caixa / PDV', primary: true },
       { to: '/produtos', icon: Package, label: 'Produtos' },
       { to: '/compras', icon: ShoppingCart, label: 'Compras' },
+      { to: '/clientes', icon: Users, label: 'Clientes e contas' },
     ],
   },
   {

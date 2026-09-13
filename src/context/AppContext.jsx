@@ -47,6 +47,8 @@ export function AppProvider({ children }) {
   const [estoque, setEstoque] = useState(() => loadFromStorage('estoque', []));
   const [vendas, setVendas] = useState(() => loadFromStorage('vendas', []));
   const [auditLog, setAuditLog] = useState(() => loadFromStorage('audit', []));
+  const [customers, setCustomers] = useState(() => loadFromStorage('customers', []));
+  const [customerLedger, setCustomerLedger] = useState(() => loadFromStorage('customerLedger', []));
   const [toast, setToast] = useState(null);
   const [storageReady, setStorageReady] = useState(false);
   const [storageInfo, setStorageInfo] = useState({ connected: false });
@@ -69,12 +71,12 @@ export function AppProvider({ children }) {
         let effectiveStored = stored;
         if (cleanupResponse.value !== true) {
           const administrator = [...(stored.users || []), ...users, ...seedUsers].find(item => item.login === 'adm') || seedUsers[0];
-          effectiveStored = { products: [], suppliers: [], financeiro: [], users: [administrator], compras: [], estoque: [], vendas: [], audit: [] };
+          effectiveStored = { products: [], suppliers: [], financeiro: [], users: [administrator], compras: [], estoque: [], vendas: [], audit: [], customers: [], customerLedger: [] };
           await Promise.all(Object.entries(effectiveStored).map(([collection, records]) => localServer.saveCollection(collection, records)));
           await localServer.setSetting('example-data-cleared-v1', true);
         }
-        const localSnapshot = { products, suppliers, financeiro, users, compras, estoque, vendas, audit: auditLog };
-        const setters = { products: setProducts, suppliers: setSuppliers, financeiro: setFinanceiro, users: setUsers, compras: setCompras, estoque: setEstoque, vendas: setVendas, audit: setAuditLog };
+        const localSnapshot = { products, suppliers, financeiro, users, compras, estoque, vendas, audit: auditLog, customers, customerLedger };
+        const setters = { products: setProducts, suppliers: setSuppliers, financeiro: setFinanceiro, users: setUsers, compras: setCompras, estoque: setEstoque, vendas: setVendas, audit: setAuditLog, customers: setCustomers, customerLedger: setCustomerLedger };
         const databaseAlreadyUsed = initializedResponse.value === true || cleanupResponse.value !== true || Object.values(effectiveStored).some(records => records?.length);
         for (const [collection, records] of Object.entries(localSnapshot)) {
           if (databaseAlreadyUsed) {
@@ -114,6 +116,8 @@ export function AppProvider({ children }) {
   useEffect(() => { saveToStorage('estoque', estoque); persist('estoque', estoque); }, [estoque, persist]);
   useEffect(() => { saveToStorage('vendas', vendas); persist('vendas', vendas); }, [vendas, persist]);
   useEffect(() => { saveToStorage('audit', auditLog); persist('audit', auditLog); }, [auditLog, persist]);
+  useEffect(() => { saveToStorage('customers', customers); persist('customers', customers); }, [customers, persist]);
+  useEffect(() => { saveToStorage('customerLedger', customerLedger); persist('customerLedger', customerLedger); }, [customerLedger, persist]);
 
   const refreshStorageInfo = useCallback(async () => {
     const info = await localServer.health();
@@ -241,6 +245,31 @@ export function AppProvider({ children }) {
     showToast('Lançamento criado!');
   }, [addAudit, showToast]);
 
+  // Clientes e contas a receber
+  const addCustomer = useCallback((customer) => {
+    const created = { ...customer, id: `CLI-${Date.now()}`, status: 'Ativo', createdAt: new Date().toISOString() };
+    setCustomers(previous => [created, ...previous]);
+    addAudit('Clientes', 'Inclusão', created.id, `Cliente ${created.name} cadastrado.`);
+    showToast('Cliente cadastrado com sucesso!');
+    return created;
+  }, [addAudit, showToast]);
+
+  const updateCustomer = useCallback((id, updates) => {
+    setCustomers(previous => previous.map(customer => customer.id === id ? { ...customer, ...updates } : customer));
+    addAudit('Clientes', 'Alteração', id, 'Cadastro do cliente atualizado.');
+    showToast('Cliente atualizado!');
+  }, [addAudit, showToast]);
+
+  const recordCustomerPayment = useCallback((customer, amount) => {
+    const now = new Date();
+    const entry = { id: `CC-${Date.now()}`, customerId: customer.id, customerName: customer.name, type: 'payment', value: Number(amount), date: now.toLocaleDateString('pt-BR'), createdAt: now.toISOString(), description: 'Pagamento recebido' };
+    setCustomerLedger(previous => [entry, ...previous]);
+    setFinanceiro(previous => [{ id: `FIN-${Date.now()}`, date: entry.date, type: 'Receita', description: `Recebimento de ${customer.name}`, category: 'Conta de cliente', value: entry.value, status: 'Lançado' }, ...previous]);
+    addAudit('Clientes', 'Pagamento', customer.id, `Pagamento de R$ ${entry.value.toFixed(2)} recebido.`);
+    showToast('Pagamento registrado no financeiro!');
+    return entry;
+  }, [addAudit, showToast]);
+
   // Users CRUD
   const addUser = useCallback((userData) => {
     setUsers(prev => [...prev, { ...userData, permissions: [] }]);
@@ -321,10 +350,14 @@ export function AppProvider({ children }) {
       })),
       ...prev,
     ]);
-    setFinanceiro(prev => [{
-      id: `FIN-${Date.now()}`, date: now.toLocaleDateString('pt-BR'), type: 'Receita',
-      description: `Venda ${id}`, category: 'Venda PDV', value: sale.total, status: 'Lançado',
-    }, ...prev]);
+    if (sale.onAccount && sale.customer?.id) {
+      setCustomerLedger(prev => [{ id: `CC-${Date.now()}`, customerId: sale.customer.id, customerName: sale.customer.name, saleId: id, type: 'purchase', value: sale.total, date: now.toLocaleDateString('pt-BR'), createdAt: now.toISOString(), description: `Compra ${id}` }, ...prev]);
+    } else {
+      setFinanceiro(prev => [{
+        id: `FIN-${Date.now()}`, date: now.toLocaleDateString('pt-BR'), type: 'Receita',
+        description: `Venda ${id}`, category: 'Venda PDV', value: sale.total, status: 'Lançado',
+      }, ...prev]);
+    }
     addAudit('PDV', 'Venda', id, `Venda finalizada no valor de R$ ${sale.total.toFixed(2)}`);
     return completedSale;
   }, [user, addAudit]);
@@ -350,6 +383,7 @@ export function AppProvider({ children }) {
     compras, addCompra, updateCompra, deleteCompra, addObservacao,
     estoque, addEstoque,
     vendas, finalizeSale,
+    customers, customerLedger, addCustomer, updateCustomer, recordCustomerPayment,
     auditLog,
     metrics,
     toast, showToast,

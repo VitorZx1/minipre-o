@@ -143,7 +143,7 @@ function CashChangeCard({ change, breakdown }) {
 }
 
 export default function PDV() {
-  const { products, finalizeSale, receiptSettings, showToast, user, authorizeManager, addAudit } = useApp();
+  const { products, finalizeSale, receiptSettings, showToast, user, authorizeManager, addAudit, customers, customerLedger } = useApp();
   const scanRef = useRef(null);
   const renewingPixRef = useRef(false);
   const [query, setQuery] = useState('');
@@ -162,7 +162,12 @@ export default function PDV() {
   const [mpCheckout, setMpCheckout] = useState(null);
   const [paymentTransaction, setPaymentTransaction] = useState(() => savedDraft.paymentTransaction?.status === 'pending' ? savedDraft.paymentTransaction : null);
   const [paymentBusy, setPaymentBusy] = useState(false);
+  const [cancellingPayment, setCancellingPayment] = useState(false);
   const [paymentError, setPaymentError] = useState('');
+  const [paymentKeyboardZone, setPaymentKeyboardZone] = useState('methods');
+  const [paymentActionIndex, setPaymentActionIndex] = useState(1);
+  const [selectedCustomerId, setSelectedCustomerId] = useState('');
+  const [customerSearch, setCustomerSearch] = useState('');
   const [weightProduct, setWeightProduct] = useState(null);
   const [weightValue, setWeightValue] = useState('');
   const [lastAddedId, setLastAddedId] = useState('');
@@ -238,6 +243,36 @@ export default function PDV() {
   }, [paymentOpen, weightProduct, lastSale, saleSuccess, confirmAction, authorization, discountOpen]);
 
   useEffect(() => {
+    const handlePdvShortcuts = event => {
+      const pressedKey = event.code?.startsWith('F') ? event.code : event.key;
+      const hasBlockingDialog = weightProduct || lastSale || saleSuccess || confirmAction || authorization || discountOpen;
+      if (['F1', 'F2', 'F3', 'F4', 'F5'].includes(pressedKey)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      if (pressedKey === 'F1' && !paymentOpen && !hasBlockingDialog) {
+        scanRef.current?.focus();
+        scanRef.current?.select();
+        return;
+      }
+      if (pressedKey === 'F2' && !paymentOpen && !hasBlockingDialog) {
+        if (cart.length) openPayment();
+        else showToast('Adicione pelo menos um produto antes de finalizar a venda.', 'warning');
+        return;
+      }
+      if (paymentOpen && !hasBlockingDialog && paymentTransaction?.status !== 'pending' && paymentTransaction?.status !== 'approved') {
+        const groupByKey = { F3: 'Manual', F4: 'PIX', F5: 'Cartão' };
+        if (groupByKey[pressedKey]) {
+          choosePaymentGroup(groupByKey[pressedKey]);
+          return;
+        }
+      }
+    };
+    window.addEventListener('keydown', handlePdvShortcuts, true);
+    return () => window.removeEventListener('keydown', handlePdvShortcuts, true);
+  }, [paymentOpen, weightProduct, lastSale, saleSuccess, confirmAction, authorization, discountOpen, cart.length, paymentGroup, paymentTransaction?.status]);
+
+  useEffect(() => {
     localServer.getSetting('card-machines').then(({ value }) => setMachines(Array.isArray(value) ? value.filter(machine => machine.active) : [])).catch(() => setMachines([]));
     localServer.getSetting('mercado-pago-checkout').then(({ value }) => setMpCheckout(value || null)).catch(() => setMpCheckout(null));
   }, []);
@@ -300,6 +335,9 @@ export default function PDV() {
   const changeBreakdown = useMemo(() => cashBreakdown(change), [change]);
   const capability = { PIX: 'acceptsPix', 'Cartão de débito': 'acceptsDebit', 'Cartão de crédito': 'acceptsCredit', Ticket: 'acceptsTicket' }[paymentMethod];
   const compatibleMachines = useMemo(() => capability ? machines.filter(machine => machine[capability]) : [], [machines, capability]);
+  const accountCustomers = useMemo(() => customers.filter(customer => (customer.status || 'Ativo') === 'Ativo' && (!customerSearch || [customer.name, customer.phone, customer.cpf].some(value => String(value || '').toLowerCase().includes(customerSearch.toLowerCase())))), [customers, customerSearch]);
+  const selectedCustomer = customers.find(customer => customer.id === selectedCustomerId);
+  const selectedCustomerBalance = selectedCustomer ? customerLedger.filter(entry => entry.customerId === selectedCustomer.id).reduce((sum, entry) => sum + (entry.type === 'purchase' ? Number(entry.value) : -Number(entry.value)), 0) : 0;
   const checkoutStep = paymentTransaction?.status === 'approved' ? 4 : paymentTransaction?.status === 'pending' ? 3 : paymentBusy ? 2 : 1;
 
   useEffect(() => {
@@ -483,7 +521,7 @@ export default function PDV() {
       payments: [{
         method: paymentMethod,
         amount: total,
-        status: automaticPayment ? 'Confirmado automaticamente' : 'Confirmado manualmente',
+        status: options.saleData?.onAccount ? 'Pendente na conta do cliente' : automaticPayment ? 'Confirmado automaticamente' : 'Confirmado manualmente',
         machineId: machine?.id || null,
         machineName: machine?.name || null,
         machineOperator: machine?.operator || null,
@@ -493,6 +531,7 @@ export default function PDV() {
       }],
       change,
       terminal: 'Caixa principal',
+      ...(options.saleData || {}),
     });
     if (options.showConfirmation !== false) setSaleSuccess(completed);
     setCart([]);
@@ -528,15 +567,27 @@ export default function PDV() {
   async function closePayment() {
     if (paymentBusy) return;
     if (paymentTransaction?.status === 'pending') {
+      setCancellingPayment(true);
       setPaymentBusy(true);
-      try { await localServer.cancelPayment(paymentTransaction.id); addAudit('PDV', 'Pagamento', paymentTransaction.id, 'Cobrança cancelada pelo operador.'); }
-      catch (error) { setPaymentError(`${error.message} Se a cobrança já apareceu na Point, cancele nela.`); setPaymentBusy(false); return; }
+      try {
+        await Promise.all([
+          localServer.cancelPayment(paymentTransaction.id),
+          new Promise(resolve => setTimeout(resolve, 900)),
+        ]);
+        addAudit('PDV', 'Pagamento', paymentTransaction.id, 'Cobrança cancelada pelo operador.');
+      }
+      catch (error) { setPaymentError(`${error.message} Se a cobrança já apareceu na maquininha, cancele nela.`); setPaymentBusy(false); setCancellingPayment(false); return; }
       setPaymentBusy(false);
+      setCancellingPayment(false);
     }
     setSelectedMachineId('');
     setPaymentTransaction(null);
     setPaymentError('');
     setPaymentOpen(false);
+    setTimeout(() => {
+      scanRef.current?.focus();
+      scanRef.current?.select();
+    }, 50);
   }
 
   function choosePaymentMethod(method) {
@@ -548,16 +599,86 @@ export default function PDV() {
     setCashChangeConfirmed(false);
   }
 
+  function moveManualPaymentSelection(direction) {
+    if (paymentTransaction?.status === 'pending') return;
+    const methods = ['Dinheiro', 'Máquina Cielo (preta)', 'Máquina Laranjinha (laranja)', 'Ticket', 'Conta do cliente'];
+    setPaymentMethod(currentMethod => {
+      const currentIndex = methods.includes(currentMethod) ? methods.indexOf(currentMethod) : 0;
+      return methods[(currentIndex + direction + methods.length) % methods.length];
+    });
+    setSelectedMachineId('');
+    setPaymentError('');
+    setReceived('');
+    setCashChangeConfirmed(false);
+  }
+
   function choosePaymentGroup(group) {
     if (paymentTransaction?.status === 'pending') return;
     setPaymentGroup(group);
     setPaymentMethod(group === 'Manual' ? 'Dinheiro' : group === 'PIX' ? 'PIX' : 'Cartão de débito');
+    setPaymentKeyboardZone(group === 'Cartão' ? 'methods' : group === 'PIX' ? 'actions' : 'methods');
+    setPaymentActionIndex(1);
     setReceived('');
     setCashChangeConfirmed(false);
     setPaymentError('');
   }
 
+  function handlePaymentModalKeyboard(event) {
+    if (paymentBusy || paymentTransaction?.status === 'pending' || paymentTransaction?.status === 'approved') return;
+    const key = event.code || event.key;
+    const isArrow = ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(key);
+    if (paymentGroup === 'Manual' && (key === 'ArrowDown' || key === 'ArrowUp')) {
+      event.preventDefault();
+      event.stopPropagation();
+      moveManualPaymentSelection(key === 'ArrowDown' ? 1 : -1);
+      return;
+    }
+    if (!['PIX', 'Cartão'].includes(paymentGroup)) return;
+    if (isArrow) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (paymentGroup === 'Cartão' && paymentKeyboardZone === 'methods') {
+        choosePaymentMethod(paymentMethod === 'Cartão de débito' ? 'Cartão de crédito' : 'Cartão de débito');
+      } else if (paymentGroup === 'Cartão' && paymentKeyboardZone === 'actions' && key === 'ArrowUp') {
+        setPaymentKeyboardZone('methods');
+      } else {
+        setPaymentActionIndex(current => current === 0 ? 1 : 0);
+      }
+      return;
+    }
+    if (key !== 'Enter') return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (paymentGroup === 'Cartão' && paymentKeyboardZone === 'methods') {
+      setPaymentKeyboardZone('actions');
+      setPaymentActionIndex(1);
+      return;
+    }
+    if (paymentActionIndex === 0) {
+      closePayment();
+      return;
+    }
+    const cannotStart = !mpCheckout?.terminalId || (paymentMethod === 'PIX' && !mpCheckout?.externalPosId);
+    if (!cannotStart) startAutomaticPayment();
+  }
+
   function finishManualSale() {
+    if (paymentMethod === 'Conta do cliente') {
+      const customer = customers.find(item => item.id === selectedCustomerId);
+      if (!customer) return showToast('Selecione o cliente que ficará com a compra na conta.', 'error');
+      const currentBalance = customerLedger.filter(entry => entry.customerId === customer.id).reduce((sum, entry) => sum + (entry.type === 'purchase' ? Number(entry.value) : -Number(entry.value)), 0);
+      const limit = Number(customer.creditLimit) || 0;
+      const commit = manager => {
+        if (manager) addAudit('PDV', 'Autorização', customer.id, `${manager} autorizou ultrapassar o limite da conta de ${customer.name}.`);
+        completeSale(null, null, { saleData: { onAccount: true, customer }, showConfirmation: true });
+      };
+      if (limit > 0 && currentBalance + total > limit) {
+        requestManagerAuthorization(`Conta de ${customer.name} ultrapassará o limite de ${money(limit)}`, commit);
+        return;
+      }
+      commit(null);
+      return;
+    }
     if (paymentMethod === 'Dinheiro') return finishCashSale();
     if (!Number.isFinite(Number(received)) || Number(received) < total) return showToast('O valor recebido é menor que o total da venda.', 'error');
     const machine = paymentMethod.startsWith('Máquina Cielo')
@@ -610,7 +731,8 @@ export default function PDV() {
           <div className="p-4 border-b border-gray-100 relative">
             <div className="relative">
               <Barcode className="absolute left-4 top-1/2 -translate-y-1/2 w-6 h-6 text-red-500" />
-              <input ref={scanRef} autoFocus value={query} onChange={event => setQuery(event.target.value)} onKeyDown={scan} placeholder="Bipe o produto ou digite o código / nome..." className="w-full pl-14 pr-4 py-4 text-lg border-2 border-red-200 rounded-xl outline-none focus:border-red-500 focus:ring-4 focus:ring-red-50" />
+              <input ref={scanRef} autoFocus value={query} onChange={event => setQuery(event.target.value)} onKeyDown={scan} placeholder="Bipe o produto ou digite o código / nome..." className="w-full pl-14 pr-36 py-4 text-lg border-2 border-red-200 rounded-xl outline-none focus:border-red-500 focus:ring-4 focus:ring-red-50" />
+              <button type="button" onClick={() => { scanRef.current?.focus(); scanRef.current?.select(); }} className="absolute right-3 top-1/2 -translate-y-1/2 rounded-lg bg-gray-100 px-3 py-1.5 text-xs font-semibold text-gray-600 hover:bg-red-50 hover:text-red-700"><span className="mr-1.5 rounded border border-gray-300 bg-white px-1.5 py-0.5 font-bold">F1</span> Buscar produto</button>
             </div>
             {suggestions.length > 0 && (
               <div className="absolute z-20 left-4 right-4 top-[78px] bg-white border border-gray-200 rounded-xl shadow-xl overflow-hidden">
@@ -642,21 +764,21 @@ export default function PDV() {
           </div>
         </section>
 
-        <aside className="col-span-4 bg-slate-900 text-white rounded-xl shadow-lg p-5 flex flex-col">
-          <div className="flex items-center gap-2 pb-4 border-b border-slate-700"><ReceiptText className="w-5 h-5 text-red-400" /><h2 className="font-semibold">Resumo da venda</h2></div>
-          <div className="py-5 space-y-3 text-sm border-b border-slate-700">
+        <aside className="col-span-4 min-h-0 bg-slate-900 text-white rounded-xl shadow-lg p-4 flex flex-col">
+          <div className="flex items-center gap-2 pb-3 border-b border-slate-700"><ReceiptText className="w-5 h-5 text-red-400" /><h2 className="font-semibold">Resumo da venda</h2></div>
+          <div className="py-3 space-y-2 text-sm border-b border-slate-700">
             <div className="flex justify-between text-slate-300"><span>Produtos diferentes</span><strong className="text-white">{cart.length}</strong></div>
             <div className="flex justify-between text-slate-300"><span>Unidades</span><strong className="text-white">{cart.filter(item => !item.soldByWeight).reduce((sum, item) => sum + item.quantity, 0)}</strong></div>
             <div className="flex justify-between text-slate-300"><span>Peso total</span><strong className="text-white">{cart.filter(item => item.soldByWeight).reduce((sum, item) => sum + item.quantity, 0).toLocaleString('pt-BR', { minimumFractionDigits: 3, maximumFractionDigits: 3 })} kg</strong></div>
             <div className="flex justify-between text-slate-300"><span>Subtotal</span><strong className="text-white">{money(subtotal)}</strong></div>
             <button disabled={!cart.length} onClick={() => { setDiscountDraft(String(discount || '')); setDiscountOpen(true); }} className="flex w-full items-center justify-between text-slate-300 disabled:opacity-40"><span>Desconto</span><span className="rounded-lg bg-slate-800 px-3 py-2 font-semibold text-white">{money(validDiscount)} <Pencil className="ml-1 inline h-3.5 w-3.5" /></span></button>
             {validDiscount > 0 && <div className="flex justify-between rounded-lg bg-emerald-500/10 px-3 py-2 text-emerald-300"><span>Economia</span><strong>{money(validDiscount)} ({subtotal ? ((validDiscount / subtotal) * 100).toFixed(1) : 0}%)</strong></div>}
-            {cart.length > 0 && <div className="rounded-lg border border-slate-700 bg-slate-800/60 p-3"><p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Último produto</p><p className="mt-1 truncate font-semibold text-white">{cart.at(-1).name}</p><p className="text-xs text-slate-300">{money(cart.at(-1).price * cart.at(-1).quantity)}</p></div>}
+            {cart.length > 0 && <div className="rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-2"><p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Último produto</p><p className="truncate text-sm font-semibold text-white">{cart.at(-1).name}</p><p className="text-xs text-slate-300">{money(cart.at(-1).price * cart.at(-1).quantity)}</p></div>}
           </div>
-          <div className="py-6"><p className="text-sm font-bold uppercase tracking-[0.16em] text-red-300">Total a pagar</p><p className="mt-1 text-5xl font-black tracking-tight text-white">{money(total)}</p></div>
-          <div className="mt-auto space-y-3">
-            <button disabled={!cart.length} onClick={openPayment} className="w-full py-4 bg-red-600 hover:bg-red-700 disabled:bg-slate-700 disabled:text-slate-500 rounded-xl font-bold text-lg shadow-lg">Finalizar venda <span className="text-sm font-normal ml-1">F10</span></button>
-            <button disabled={!cart.length} onClick={cancelSale} className="w-full py-2.5 border border-slate-700 hover:bg-slate-800 disabled:opacity-40 rounded-lg text-sm text-slate-300">Cancelar venda</button>
+          <div className="py-4"><p className="text-xs font-bold uppercase tracking-[0.16em] text-red-300">Total a pagar</p><p className="mt-1 text-4xl font-black tracking-tight text-white">{money(total)}</p></div>
+          <div className="mt-auto space-y-2">
+            <button disabled={!cart.length} onClick={openPayment} className="w-full py-3 bg-red-600 hover:bg-red-700 disabled:bg-slate-700 disabled:text-slate-500 rounded-xl font-bold text-base shadow-lg">Finalizar venda <span className="text-xs font-normal ml-1">F2</span></button>
+            <button disabled={!cart.length} onClick={cancelSale} className="w-full py-2 border border-slate-700 hover:bg-slate-800 disabled:opacity-40 rounded-lg text-sm text-slate-300">Cancelar venda</button>
           </div>
         </aside>
       </div>
@@ -683,20 +805,20 @@ export default function PDV() {
       )}
 
       {paymentOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-3"><div className="absolute inset-0 bg-black/60" onClick={paymentTransaction?.status === 'approved' ? undefined : closePayment} /><div className={`relative flex max-h-[calc(100vh-1rem)] w-full flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ${paymentMethod === 'PIX' && paymentTransaction?.pixPayload ? 'max-w-md' : 'max-w-3xl'}`}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-3"><div className="absolute inset-0 bg-black/60" onClick={paymentTransaction?.status === 'approved' ? undefined : closePayment} /><div onKeyDownCapture={handlePaymentModalKeyboard} className={`relative flex max-h-[calc(100vh-1rem)] w-full flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ${paymentMethod === 'PIX' && paymentTransaction?.pixPayload ? 'max-w-md' : 'max-w-3xl'}`}>
           <div className="flex shrink-0 items-center justify-between border-b px-5 py-3"><div><h2 className="text-xl font-bold">Receber pagamento</h2><p className="text-sm text-gray-500">Total da venda: <strong className="text-red-600">{money(total)}</strong></p></div><button disabled={paymentBusy || paymentTransaction?.status === 'approved'} onClick={closePayment} className="p-2 hover:bg-gray-100 rounded-lg disabled:opacity-30"><X className="w-5 h-5" /></button></div>
           <div className="grid shrink-0 grid-cols-4 border-b bg-gray-50 px-5 py-2">{['Escolher método', 'Preparando', 'Aguardando cliente', 'Confirmado'].map((label, index) => <div key={label} className={`flex items-center text-[11px] font-semibold ${index + 1 <= checkoutStep ? 'text-emerald-700' : 'text-gray-400'}`}><span className={`mr-2 flex h-6 w-6 items-center justify-center rounded-full ${index + 1 < checkoutStep ? 'bg-emerald-600 text-white' : index + 1 === checkoutStep ? 'bg-red-600 text-white ring-4 ring-red-100' : 'bg-gray-200'}`}>{index + 1 < checkoutStep ? '✓' : index + 1}</span><span className="hidden sm:inline">{label}</span></div>)}</div>
           <div className={`min-h-0 flex-1 overflow-hidden p-4 ${paymentMethod === 'PIX' && paymentTransaction?.pixPayload ? 'block' : 'grid grid-cols-1 items-start gap-4 md:grid-cols-2'}`}>
             {!(paymentMethod === 'PIX' && paymentTransaction?.pixPayload) && <div className="space-y-3">
-              {[['Manual', Banknote], ['PIX', QrCode], ['Cartão', CreditCard]].map(([group, Icon]) => <button key={group} onClick={() => choosePaymentGroup(group)} className={`w-full flex items-center gap-4 p-4 border-2 rounded-xl text-left ${paymentGroup === group ? 'border-red-500 bg-red-50 text-red-700' : 'border-gray-200 hover:border-gray-300'}`}><Icon className="w-6 h-6" /><div><strong>{group}</strong><p className="text-xs opacity-70">{group === 'Manual' ? 'Dinheiro, máquinas não cadastradas ou ticket' : group === 'PIX' ? 'QR Code confirmado automaticamente' : 'Débito ou crédito pela Point cadastrada'}</p></div></button>)}
+              {[['Manual', Banknote, 'F3'], ['PIX', QrCode, 'F4'], ['Cartão', CreditCard, 'F5']].map(([group, Icon, shortcut]) => <button key={group} onClick={() => choosePaymentGroup(group)} className={`w-full flex items-center gap-4 p-4 border-2 rounded-xl text-left ${paymentGroup === group ? 'border-red-500 bg-red-50 text-red-700' : 'border-gray-200 hover:border-gray-300'}`}><Icon className="w-6 h-6" /><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-3"><strong>{group}</strong><span className="rounded border border-current/20 bg-white/70 px-2 py-0.5 text-[11px] font-bold">{shortcut}</span></div><p className="text-xs opacity-70">{group === 'Manual' ? 'Dinheiro, máquinas não cadastradas ou ticket' : group === 'PIX' ? 'QR Code confirmado automaticamente' : 'Débito ou crédito pela Point cadastrada'}</p></div></button>)}
               {paymentGroup === 'Manual' && paymentMethod === 'Dinheiro' && cashChangeConfirmed && <CashChangeCard change={change} breakdown={changeBreakdown} />}
             </div>}
             <div className={`bg-gray-50 rounded-xl p-4 flex flex-col justify-center ${paymentMethod === 'PIX' && paymentTransaction?.pixPayload ? 'min-h-[300px]' : ''}`}>
-              {paymentGroup === 'Manual' && <div className="space-y-3"><p className="text-sm font-semibold text-gray-700">Como o cliente pagará?</p>{['Dinheiro', 'Máquina Cielo (preta)', 'Máquina Laranjinha (laranja)', 'Ticket'].map(method => <button key={method} onClick={() => choosePaymentMethod(method)} className={`w-full p-3 rounded-lg border-2 text-left text-sm font-medium ${paymentMethod === method ? 'border-red-500 bg-red-50 text-red-700' : 'border-gray-200 bg-white'}`}>{method}</button>)}<label className="block text-sm font-medium text-gray-700 pt-2">{paymentMethod === 'Dinheiro' ? 'Valor entregue pelo cliente' : 'Valor recebido'}</label><input autoFocus type="text" inputMode="numeric" value={received === '' ? '' : money(received)} onChange={changeReceivedValue} className="w-full px-4 py-3 text-xl border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-red-500" placeholder="R$ 0,00" /></div>}
-              {paymentGroup === 'Cartão' && <div className="space-y-4">{paymentTransaction?.status === 'approved' ? <div className="space-y-4 text-center"><CircleCheckBig className="mx-auto h-24 w-24 text-emerald-500" /><div><p className="text-2xl font-bold text-emerald-700">Pagamento confirmado!</p><p className="text-sm text-gray-600">A maquininha confirmou {money(total)}.</p></div><button onClick={() => finishApprovedPayment(true)} className="flex w-full items-center justify-center gap-2 rounded-lg bg-red-600 px-5 py-3 font-semibold text-white"><Printer className="h-5 w-5" /> Imprimir comprovante</button><button onClick={() => finishApprovedPayment(false)} className="w-full rounded-lg border border-emerald-600 px-5 py-3 font-semibold text-emerald-700">Concluir sem imprimir</button></div> : paymentTransaction?.status === 'pending' ? <div className="py-8 text-center"><div className="mb-3 flex justify-center"><CheckoutCartLoader size="large" /></div><p className="text-xl font-bold text-gray-900">Aguardando o cliente</p><p className="mt-2 text-sm text-gray-600">Insira, aproxime ou passe o cartão na maquininha.</p><p className="mt-4 inline-flex items-center gap-2 rounded-full bg-red-50 py-1.5 pl-2 pr-4 text-sm font-semibold text-red-700"><CheckoutCartLoader /><span className="payment-consulting-pulse">Aguardando resposta da maquininha</span></p></div> : <><p className="text-sm font-semibold text-gray-700">Selecione o tipo do cartão</p>{['Cartão de débito', 'Cartão de crédito'].map(method => <button key={method} onClick={() => choosePaymentMethod(method)} className={`w-full p-4 rounded-lg border-2 text-left font-medium ${paymentMethod === method ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white'}`}>{method}</button>)}<p className="text-xs text-emerald-700 bg-emerald-50 rounded-lg p-3">O valor será enviado para a maquininha principal e confirmado automaticamente.</p></>}{paymentError && <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">{paymentError}</p>}</div>}
+              {paymentGroup === 'Manual' && <div className="space-y-2"><div className="flex items-center justify-between gap-3"><p className="text-sm font-semibold text-gray-700">Como o cliente pagará?</p><span className="text-[11px] font-medium text-gray-500">Use ↑ e ↓</span></div>{['Dinheiro', 'Máquina Cielo (preta)', 'Máquina Laranjinha (laranja)', 'Ticket', 'Conta do cliente'].map(method => <button key={method} onClick={() => choosePaymentMethod(method)} className={`w-full rounded-lg border-2 px-3 py-2.5 text-left text-sm font-medium ${paymentMethod === method ? 'border-red-500 bg-red-50 text-red-700' : 'border-gray-200 bg-white'}`}>{method}</button>)}{paymentMethod === 'Conta do cliente' ? <div className="space-y-2 pt-1"><label className="block text-sm font-medium text-gray-700">Localizar cliente</label><input autoFocus value={customerSearch} onChange={event => setCustomerSearch(event.target.value)} placeholder="Nome, telefone ou CPF" className="w-full rounded-lg border px-3 py-2.5 outline-none focus:border-red-500" /><select value={selectedCustomerId} onChange={event => setSelectedCustomerId(event.target.value)} className="w-full rounded-lg border bg-white px-3 py-2.5 outline-none focus:border-red-500"><option value="">Selecione o cliente</option>{accountCustomers.map(customer => <option key={customer.id} value={customer.id}>{customer.name} · {customer.phone}</option>)}</select>{selectedCustomer && <div className="rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-900"><div className="flex justify-between"><span>Saldo atual</span><strong>{money(Math.max(0, selectedCustomerBalance))}</strong></div><div className="mt-1 flex justify-between"><span>Após esta compra</span><strong>{money(Math.max(0, selectedCustomerBalance) + total)}</strong></div>{selectedCustomer.creditLimit ? <div className="mt-1 flex justify-between"><span>Limite</span><strong>{money(selectedCustomer.creditLimit)}</strong></div> : <p className="mt-1 text-amber-700">Sem limite definido</p>}</div>}</div> : <><label className="block pt-2 text-sm font-medium text-gray-700">{paymentMethod === 'Dinheiro' ? 'Valor entregue pelo cliente' : 'Valor recebido'}</label><input autoFocus type="text" inputMode="numeric" value={received === '' ? '' : money(received)} onChange={changeReceivedValue} className="w-full rounded-lg border border-gray-300 px-4 py-3 text-xl outline-none focus:ring-2 focus:ring-red-500" placeholder="R$ 0,00" /></>}</div>}
+              {paymentGroup === 'Cartão' && <div className="space-y-4">{paymentTransaction?.status === 'approved' ? <div className="space-y-4 text-center"><CircleCheckBig className="mx-auto h-24 w-24 text-emerald-500" /><div><p className="text-2xl font-bold text-emerald-700">Pagamento confirmado!</p><p className="text-sm text-gray-600">A maquininha confirmou {money(total)}.</p></div><button onClick={() => finishApprovedPayment(true)} className="flex w-full items-center justify-center gap-2 rounded-lg bg-red-600 px-5 py-3 font-semibold text-white"><Printer className="h-5 w-5" /> Imprimir comprovante</button><button onClick={() => finishApprovedPayment(false)} className="w-full rounded-lg border border-emerald-600 px-5 py-3 font-semibold text-emerald-700">Concluir sem imprimir</button></div> : paymentTransaction?.status === 'pending' ? <div className="py-8 text-center"><div className="mb-3 flex justify-center"><CheckoutCartLoader size="large" /></div><p className="text-xl font-bold text-gray-900">Aguardando o cliente</p><p className="mt-2 text-sm text-gray-600">Insira, aproxime ou passe o cartão na maquininha.</p><p className="mt-4 inline-flex items-center gap-2 rounded-full bg-red-50 py-1.5 pl-2 pr-4 text-sm font-semibold text-red-700"><CheckoutCartLoader /><span className="payment-consulting-pulse">Aguardando resposta da maquininha</span></p></div> : <><div className="flex items-center justify-between"><p className="text-sm font-semibold text-gray-700">Selecione o tipo do cartão</p><span className="text-[11px] text-gray-500">↑ ↓ e Enter</span></div>{['Cartão de débito', 'Cartão de crédito'].map(method => <button key={method} onClick={() => { choosePaymentMethod(method); setPaymentKeyboardZone('methods'); }} className={`w-full p-4 rounded-lg border-2 text-left font-medium ${paymentMethod === method ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white'} ${paymentKeyboardZone === 'methods' && paymentMethod === method ? 'ring-2 ring-blue-300 ring-offset-1' : ''}`}>{method}</button>)}<p className="text-xs text-emerald-700 bg-emerald-50 rounded-lg p-3">O valor será enviado para a maquininha principal e confirmado automaticamente.</p></>}{paymentError && <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">{paymentError}</p>}</div>}
               {paymentGroup === 'PIX' && <div className="space-y-4 text-center">
-                {paymentBusy ? <div className="py-5"><div className="flex justify-center"><CheckoutCartLoader size="large" /></div><p className="mt-3 font-semibold text-gray-700">Preparando cobrança segura...</p></div> : paymentMethod === 'PIX' && paymentTransaction?.pixPayload ? <>{paymentTransaction.status === 'approved' ? <CircleCheckBig className="mx-auto h-20 w-20 text-emerald-500" /> : <div className="relative mx-auto inline-block rounded-xl border bg-white p-3 shadow-sm"><span className="absolute -inset-2 -z-10 animate-pulse rounded-2xl bg-blue-100" /><QRCodeSVG value={paymentTransaction.pixPayload} size={190} /></div>}</> : <QrCode className="w-14 h-14 mx-auto text-blue-500" />}
-                {paymentTransaction?.status === 'approved' ? <div className="space-y-4"><div><p className="text-2xl font-bold text-emerald-700">Pagamento confirmado!</p><p className="mt-1 text-sm text-gray-600">O Mercado Pago confirmou o recebimento de {money(total)}.</p></div><div className="grid gap-3"><button type="button" onClick={() => finishApprovedPayment(true)} className="flex items-center justify-center gap-2 rounded-lg bg-red-600 px-5 py-3 font-semibold text-white hover:bg-red-700"><Printer className="h-5 w-5" /> Imprimir comprovante</button><button type="button" onClick={() => finishApprovedPayment(false)} className="rounded-lg border border-emerald-600 bg-white px-5 py-3 font-semibold text-emerald-700 hover:bg-emerald-50">Concluir venda sem imprimir</button></div></div> : <div>{paymentTransaction?.status === 'pending' ? <><p className="text-base font-bold">Aguardando o cliente pagar o QR Code</p><p className="mt-2 inline-flex items-center gap-2 rounded-full bg-red-50 py-1.5 pl-2 pr-4 text-sm text-red-700"><CheckoutCartLoader /><span className="payment-consulting-pulse font-semibold">Consultando pagamento automaticamente</span></p><p className={`mt-3 text-sm font-semibold ${pixSeconds <= 60 ? 'text-red-600' : 'text-gray-600'}`}>Este QR Code expira em {String(Math.floor(pixSeconds / 60)).padStart(2, '0')}:{String(pixSeconds % 60).padStart(2, '0')}</p></> : <p className="text-sm font-semibold">Gerar Pix real de {money(total)}</p>}</div>}
+                {paymentBusy ? <div className="py-5"><div className="flex justify-center"><CheckoutCartLoader size="large" /></div><p className={`mt-3 font-semibold ${cancellingPayment ? 'payment-consulting-pulse text-red-700' : 'text-gray-700'}`}>{cancellingPayment ? 'Cancelando cobrança...' : 'Preparando cobrança segura...'}</p>{cancellingPayment && <p className="mt-2 text-xs text-gray-500">Aguarde a confirmação antes de fechar esta tela.</p>}</div> : paymentMethod === 'PIX' && paymentTransaction?.pixPayload ? <>{paymentTransaction.status === 'approved' ? <CircleCheckBig className="mx-auto h-20 w-20 text-emerald-500" /> : <div className="relative mx-auto inline-block rounded-xl border bg-white p-3 shadow-sm"><span className="absolute -inset-2 -z-10 animate-pulse rounded-2xl bg-blue-100" /><QRCodeSVG value={paymentTransaction.pixPayload} size={190} /></div>}</> : <QrCode className="w-14 h-14 mx-auto text-blue-500" />}
+                {!paymentBusy && (paymentTransaction?.status === 'approved' ? <div className="space-y-4"><div><p className="text-2xl font-bold text-emerald-700">Pagamento confirmado!</p><p className="mt-1 text-sm text-gray-600">O Mercado Pago confirmou o recebimento de {money(total)}.</p></div><div className="grid gap-3"><button type="button" onClick={() => finishApprovedPayment(true)} className="flex items-center justify-center gap-2 rounded-lg bg-red-600 px-5 py-3 font-semibold text-white hover:bg-red-700"><Printer className="h-5 w-5" /> Imprimir comprovante</button><button type="button" onClick={() => finishApprovedPayment(false)} className="rounded-lg border border-emerald-600 bg-white px-5 py-3 font-semibold text-emerald-700 hover:bg-emerald-50">Concluir venda sem imprimir</button></div></div> : <div>{paymentTransaction?.status === 'pending' ? <><p className="text-base font-bold">Aguardando o cliente pagar o QR Code</p><p className="mt-2 inline-flex items-center gap-2 rounded-full bg-red-50 py-1.5 pl-2 pr-4 text-sm text-red-700"><CheckoutCartLoader /><span className="payment-consulting-pulse font-semibold">Consultando pagamento automaticamente</span></p><p className={`mt-3 text-sm font-semibold ${pixSeconds <= 60 ? 'text-red-600' : 'text-gray-600'}`}>Este QR Code expira em {String(Math.floor(pixSeconds / 60)).padStart(2, '0')}:{String(pixSeconds % 60).padStart(2, '0')}</p></> : <p className="text-sm font-semibold">Gerar Pix real de {money(total)}</p>}</div>)}
                 {!(paymentMethod === 'PIX' && paymentTransaction?.pixPayload) && (mpCheckout?.terminalId ? <p className="text-xs text-emerald-700 bg-emerald-50 rounded-lg p-3">Point principal vinculada ao caixa.</p> : <p className="text-xs text-red-700 bg-red-50 rounded-lg p-3">Defina a Point principal em Armazenamento local antes de cobrar.</p>)}
                 {paymentMethod === 'PIX' && !mpCheckout?.externalPosId && <div className="text-xs text-amber-800 bg-amber-50 rounded-lg p-3 space-y-2"><p>O caixa Mercado Pago ainda não possui o identificador necessário para gerar o Pix na tela. Cartão já pode usar a Point.</p><button type="button" onClick={configurePix} disabled={paymentBusy || !mpCheckout?.posId} className="px-3 py-2 bg-amber-600 text-white rounded-lg font-semibold disabled:opacity-50">{paymentBusy ? 'Configurando...' : 'Configurar Pix na tela'}</button></div>}
                 {paymentError && <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3 text-left">{paymentError}</p>}
@@ -704,7 +826,7 @@ export default function PDV() {
               </div>}
             </div>
           </div>
-          {paymentTransaction?.status !== 'approved' && <div className="flex shrink-0 justify-end gap-3 border-t bg-gray-50 px-5 py-3"><button disabled={paymentBusy} onClick={closePayment} className="px-5 py-2.5 text-gray-600 disabled:opacity-50">{paymentTransaction?.status === 'pending' ? 'Cancelar cobrança' : 'Voltar'}</button>{!(paymentMethod === 'PIX' && paymentTransaction?.pixPayload) && (paymentGroup === 'Manual' ? <button onClick={finishManualSale} className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold">{paymentMethod === 'Dinheiro' ? cashChangeConfirmed ? 'Finalizar venda' : 'Confirmar dinheiro recebido e gerar troco' : 'Confirmar pagamento manual'}</button> : <button onClick={startAutomaticPayment} disabled={paymentBusy || paymentTransaction?.status === 'pending' || !mpCheckout?.terminalId || (paymentMethod === 'PIX' && !mpCheckout?.externalPosId)} className="flex items-center gap-2 px-6 py-2.5 bg-blue-600 disabled:bg-blue-300 text-white rounded-lg font-semibold">{paymentBusy && <CheckoutCartLoader size="button" />}{paymentBusy ? 'Preparando...' : paymentMethod === 'PIX' ? 'Gerar QR Code' : 'Enviar para a maquininha'}</button>)}</div>}
+          {paymentTransaction?.status !== 'approved' && <div className="flex shrink-0 items-center justify-end gap-3 border-t bg-gray-50 px-5 py-3">{['PIX', 'Cartão'].includes(paymentGroup) && !paymentBusy && !paymentTransaction?.status && <span className="mr-auto hidden text-[11px] font-medium text-gray-500 sm:inline">Use as setas e Enter para confirmar</span>}<button disabled={paymentBusy} onClick={closePayment} className={`flex items-center gap-2 rounded-lg px-5 py-2.5 text-gray-600 disabled:opacity-60 ${['PIX', 'Cartão'].includes(paymentGroup) && paymentKeyboardZone === 'actions' && paymentActionIndex === 0 ? 'bg-white ring-2 ring-red-400 ring-offset-1' : ''}`}>{cancellingPayment && <CheckoutCartLoader size="button" />}{cancellingPayment ? 'Cancelando cobrança...' : paymentTransaction?.status === 'pending' ? 'Cancelar cobrança' : 'Voltar'}</button>{!(paymentMethod === 'PIX' && paymentTransaction?.pixPayload) && (paymentGroup === 'Manual' ? <button onClick={finishManualSale} className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold">{paymentMethod === 'Dinheiro' ? cashChangeConfirmed ? 'Finalizar venda' : 'Confirmar dinheiro recebido e gerar troco' : paymentMethod === 'Conta do cliente' ? 'Lançar na conta do cliente' : 'Confirmar pagamento manual'}</button> : <button onClick={startAutomaticPayment} disabled={paymentBusy || paymentTransaction?.status === 'pending' || !mpCheckout?.terminalId || (paymentMethod === 'PIX' && !mpCheckout?.externalPosId)} className={`flex items-center gap-2 rounded-lg bg-blue-600 px-6 py-2.5 font-semibold text-white disabled:bg-blue-300 ${paymentKeyboardZone === 'actions' && paymentActionIndex === 1 ? 'ring-2 ring-blue-400 ring-offset-2' : ''}`}>{paymentBusy && !cancellingPayment && <CheckoutCartLoader size="button" />}{paymentBusy ? 'Preparando...' : paymentMethod === 'PIX' ? 'Gerar QR Code' : 'Enviar para a maquininha'}</button>)}</div>}
         </div></div>
       )}
 

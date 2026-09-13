@@ -10,6 +10,7 @@ import { localServer } from '../services/localServer';
 export default function Produtos() {
   const { products, addProduct, updateProduct, deleteProduct, inactivateProduct, showToast } = useApp();
   const barcodeRef = useRef(null);
+  const conferenceRef = useRef(null);
   const [selected, setSelected] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [modalType, setModalType] = useState(''); // 'new', 'edit', 'confirmDelete'
@@ -19,6 +20,9 @@ export default function Produtos() {
   const [form, setForm] = useState({});
   const [lookupBusy, setLookupBusy] = useState(false);
   const [lookupMessage, setLookupMessage] = useState('');
+  const [conferenceOpen, setConferenceOpen] = useState(false);
+  const [conferenceCode, setConferenceCode] = useState('');
+  const [conferenceResult, setConferenceResult] = useState(null);
 
   const filtered = useMemo(() => {
     return products.filter(p => {
@@ -52,6 +56,32 @@ export default function Produtos() {
 
   const handleNew = () => {
     setForm({ internalCode: '', barcode: '', name: '', category: 'Mercearia', unit: 'Unidade', soldByWeight: false, cost: '', price: '', stock: 0, supplier: '', status: 'Ativo' });
+    setModalType('new');
+    setModalOpen(true);
+    setLookupMessage('');
+    setTimeout(() => barcodeRef.current?.focus(), 50);
+  };
+
+  const openConference = () => {
+    setConferenceCode('');
+    setConferenceResult(null);
+    setConferenceOpen(true);
+    setTimeout(() => conferenceRef.current?.focus(), 50);
+  };
+
+  const checkRegisteredProduct = () => {
+    const barcode = String(conferenceCode || '').replace(/\D/g, '');
+    if (!barcode) return;
+    const product = products.find(item => String(item.barcode || '') === barcode);
+    setConferenceCode(barcode);
+    setConferenceResult(product ? { found: true, product } : { found: false, barcode });
+    setTimeout(() => conferenceRef.current?.focus(), 50);
+  };
+
+  const registerConferenceProduct = () => {
+    const barcode = conferenceResult?.barcode || conferenceCode;
+    setConferenceOpen(false);
+    setForm({ internalCode: '', barcode, name: '', category: 'Mercearia', unit: 'Unidade', soldByWeight: false, cost: '', price: '', stock: 0, supplier: '', status: 'Ativo' });
     setModalType('new');
     setModalOpen(true);
     setLookupMessage('');
@@ -141,6 +171,9 @@ export default function Produtos() {
         <button onClick={handleNew} className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 transition-colors shadow-sm">
           <Plus className="w-4 h-4" /> Novo produto
         </button>
+        <button onClick={openConference} className="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-medium text-blue-700 shadow-sm transition-colors hover:bg-blue-100">
+          <ScanBarcode className="w-4 h-4" /> Conferir produto
+        </button>
         <button onClick={handleEdit} disabled={!selected} className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
           <Edit className="w-4 h-4" /> Editar
         </button>
@@ -209,6 +242,24 @@ export default function Produtos() {
       <div className="text-sm text-gray-500">
         {filtered.length} produto{filtered.length !== 1 ? 's' : ''} localizado{filtered.length !== 1 ? 's' : ''}
       </div>
+
+      <Modal isOpen={conferenceOpen} onClose={() => setConferenceOpen(false)} title="Conferência de produto">
+        <div className="space-y-4">
+          <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+            <div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-lg bg-white text-blue-600 shadow-sm"><ScanBarcode className="h-6 w-6" /></span><div><p className="font-semibold text-blue-950">Bipe o produto para conferir</p><p className="text-sm text-blue-700">Esta conferência não altera o cadastro nem o estoque.</p></div></div>
+          </div>
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-gray-700">Código de barras</label>
+            <div className="flex gap-2">
+              <input ref={conferenceRef} autoFocus inputMode="numeric" value={conferenceCode} onChange={event => { setConferenceCode(event.target.value.replace(/\D/g, '')); setConferenceResult(null); }} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); checkRegisteredProduct(); } }} placeholder="Bipe ou digite o código" className="min-w-0 flex-1 rounded-lg border-2 border-blue-200 px-4 py-3 font-mono text-lg tracking-wider outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" />
+              <button type="button" onClick={checkRegisteredProduct} disabled={!conferenceCode} className="rounded-lg bg-blue-600 px-5 py-3 font-semibold text-white hover:bg-blue-700 disabled:bg-gray-300">Conferir</button>
+            </div>
+          </div>
+          {conferenceResult?.found && <div className={`rounded-xl border p-5 ${conferenceResult.product.status === 'Ativo' ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}><div className="flex items-start gap-3"><CheckCircle2 className={`mt-0.5 h-7 w-7 shrink-0 ${conferenceResult.product.status === 'Ativo' ? 'text-emerald-600' : 'text-amber-600'}`} /><div className="min-w-0"><p className={`text-lg font-bold ${conferenceResult.product.status === 'Ativo' ? 'text-emerald-800' : 'text-amber-800'}`}>{conferenceResult.product.status === 'Ativo' ? 'Produto já cadastrado' : 'Produto cadastrado, mas inativo'}</p><p className="mt-1 font-semibold text-gray-900">{conferenceResult.product.name}</p><div className="mt-3 grid grid-cols-2 gap-x-5 gap-y-2 text-sm text-gray-600"><p>Código: <strong>{conferenceResult.product.id}</strong></p><p>Preço: <strong>R$ {Number(conferenceResult.product.price || 0).toFixed(2).replace('.', ',')}</strong></p><p>Categoria: <strong>{conferenceResult.product.category}</strong></p><p>Estoque: <strong>{conferenceResult.product.stock} {conferenceResult.product.soldByWeight ? 'kg' : conferenceResult.product.unit || 'un.'}</strong></p></div></div></div></div>}
+          {conferenceResult && !conferenceResult.found && <div className="rounded-xl border border-red-200 bg-red-50 p-5"><div className="flex items-start gap-3"><X className="mt-0.5 h-7 w-7 shrink-0 rounded-full bg-red-600 p-1 text-white" /><div><p className="text-lg font-bold text-red-800">Produto ainda não cadastrado</p><p className="mt-1 text-sm text-red-700">Nenhum produto do sistema utiliza o código {conferenceResult.barcode}.</p><button type="button" onClick={registerConferenceProduct} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-red-700"><Plus className="h-4 w-4" /> Cadastrar este produto</button></div></div></div>}
+          {conferenceResult && <button type="button" onClick={() => { setConferenceCode(''); setConferenceResult(null); setTimeout(() => conferenceRef.current?.focus(), 0); }} className="w-full rounded-lg border border-gray-200 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50">Conferir outro produto</button>}
+        </div>
+      </Modal>
 
       {/* Modal */}
       <Modal
